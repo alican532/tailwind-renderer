@@ -77,6 +77,25 @@ app.post('/render', async (req, res) => {
   res.json({ finalHtml });
 });
 
+app.post('/render-raw', async (req, res) => {
+  if (TOKEN && req.headers['x-render-token'] !== TOKEN) {
+    return res.status(401).send('unauthorized');
+  }
+  const raw = String(req.body.html || '');
+  const doc = `<!doctype html><html><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${raw}</body></html>`;
+
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.setContent(doc, { waitUntil: 'load' });
+  await page.waitForTimeout(Number(process.env.RENDER_WAIT_MS || 2000));
+  const rendered = await page.content();
+  await browser.close();
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(rendered);
+});
+
 app.get('/', (_req, res) => res.send('OK'));
 
 const port = process.env.PORT || 3001;
