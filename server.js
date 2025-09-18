@@ -96,6 +96,82 @@ app.post('/render-raw', async (req, res) => {
   res.send(rendered);
 });
 
+// server.js içine EK UÇ NOKTASI
+app.post('/render-css', async (req, res) => {
+  try {
+    if (TOKEN && req.headers['x-render-token'] !== TOKEN) {
+      return res.status(401).send('unauthorized');
+    }
+    const raw = String(req.body.html || '');
+    // Opsiyonel: harici CSS linklerini da dahil et (1/true -> dahil)
+    const includeLinks = String(req.query.includeLinks || req.body.includeLinks || '').toLowerCase();
+    const wantLinks = includeLinks === '1' || includeLinks === 'true';
+
+    const doc = `<!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body>${raw}</body></html>`;
+
+    const { chromium } = require('playwright');
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    await page.setContent(doc, { waitUntil: 'load' });
+    await page.waitForTimeout(Number(process.env.RENDER_WAIT_MS || 2000)); // Tailwind/diğerleri için bekleme
+    const rendered = await page.content();
+    await browser.close();
+
+    // 1) Tüm inline <style> bloklarını topla (Tailwind çıktısı dahil)
+    const styleBlocks = [];
+    rendered.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, (_, css) => {
+      styleBlocks.push(css);
+      return '';
+    });
+
+    // 2) (Opsiyonel) Harici CSS linklerini whitelist ile al ve <style> içine göm
+    // Whitelist'i env ile override edebilirsin: CSS_LINK_WHITELIST="cdn.jsdelivr.net,fonts.googleapis.com"
+    const wl = (process.env.CSS_LINK_WHITELIST || 'cdn.jsdelivr.net,fonts.googleapis.com')
+      .split(',').map(s => s.trim()).filter(Boolean);
+
+    async function pickAndFetchCssLinks(html) {
+      const urls = new Set();
+      html.replace(/<link[^>]+rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*>/gi, (_, href) => {
+        try {
+          const u = new URL(href, 'https://example.base/');
+          const host = u.hostname.replace(/^www\./,'');
+          if (wl.some(w => host.endsWith(w))) urls.add(u.href);
+        } catch {}
+        return '';
+      });
+      // Node 18+ global fetch
+      const out = [];
+      for (const href of urls) {
+        try {
+          const r = await fetch(href);
+          if (r.ok) {
+            const txt = await r.text();
+            out.push(txt);
+          }
+        } catch { /* ignore individual failures */ }
+      }
+      return out;
+    }
+
+    if (wantLinks) {
+      const externalCss = await pickAndFetchCssLinks(rendered);
+      for (const css of externalCss) styleBlocks.push(css);
+    }
+
+    // 3) Yanıt: <style> bloklarını birleştirip döndür
+    // (İstersen minify ekleyebilirsin; burada raw bırakıyoruz)
+    const htmlOut = styleBlocks.map(css => `<style>\n${css}\n</style>`).join('\n');
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(htmlOut);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send('render-css error');
+  }
+});
+
 app.get('/', (_req, res) => res.send('OK'));
 
 const port = process.env.PORT || 3001;
